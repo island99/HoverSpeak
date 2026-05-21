@@ -66,6 +66,12 @@ class TriggerSwitchController(AppKit.NSObject):
         self.speaker = speaker
         self.panel = None
         self.control = None
+        self.current_selection_id = None
+        self.dismissed_selection_id = None
+        self.mouse_monitor = AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            AppKit.NSEventMaskLeftMouseDown | AppKit.NSEventMaskRightMouseDown,
+            self._handle_global_mouse_down,
+        )
         self._build_panel()
         return self
 
@@ -115,10 +121,15 @@ class TriggerSwitchController(AppKit.NSObject):
     def modeChanged_(self, sender):
         self.speaker.set_trigger_mode(TRIGGER_MODES[sender.selectedSegment()])
 
-    def show_near_mouse(self) -> None:
+    def show_for_selection(self, selection_id: str) -> None:
         if self.panel is None:
             return
+        if self.dismissed_selection_id == selection_id:
+            return
+        if self.current_selection_id == selection_id and self.panel.isVisible():
+            return
 
+        self.current_selection_id = selection_id
         mouse = AppKit.NSEvent.mouseLocation()
         frame = self.panel.frame()
         screen = AppKit.NSScreen.mainScreen()
@@ -132,9 +143,40 @@ class TriggerSwitchController(AppKit.NSObject):
         if self.panel is not None:
             self.panel.orderOut_(None)
 
+    def dismiss_current_selection(self) -> None:
+        if self.current_selection_id is not None:
+            self.dismissed_selection_id = self.current_selection_id
+        self.hide()
+
+    def clear_selection(self) -> None:
+        self.current_selection_id = None
+        self.dismissed_selection_id = None
+        self.hide()
+
     def sync(self) -> None:
         if self.control is not None:
             self.control.setSelectedSegment_(self.speaker.mode_index())
+
+    def _handle_global_mouse_down(self, event) -> None:
+        if self.panel is None or not self.panel.isVisible():
+            return
+
+        if not self._point_is_inside_panel(event.locationInWindow()):
+            self.dismiss_current_selection()
+
+    def handle_local_mouse_down(self, event) -> None:
+        if self.panel is None or not self.panel.isVisible():
+            return
+        if event.window() == self.panel:
+            return
+        self.dismiss_current_selection()
+
+    def _point_is_inside_panel(self, point) -> bool:
+        frame = self.panel.frame()
+        return (
+            frame.origin.x <= point.x <= frame.origin.x + frame.size.width
+            and frame.origin.y <= point.y <= frame.origin.y + frame.size.height
+        )
 
 
 class HoverSpeaker:
@@ -143,6 +185,7 @@ class HoverSpeaker:
         self.speech_process: subprocess.Popen | None = None
         self.speech_text: str | None = None
         self.selection_text: str | None = None
+        self.selection_id: str | None = None
         self.selection_next_speak_at = 0.0
         self.last_selection_copy_at = 0.0
         self.accessibility_enabled = False
@@ -203,6 +246,11 @@ class HoverSpeaker:
             )
             if event is None:
                 break
+            if self.trigger_switch is not None and event.type() in (
+                AppKit.NSEventTypeLeftMouseDown,
+                AppKit.NSEventTypeRightMouseDown,
+            ):
+                self.trigger_switch.handle_local_mouse_down(event)
             self.app.sendEvent_(event)
             self.app.updateWindows()
 
@@ -258,17 +306,20 @@ class HoverSpeaker:
             if self.selection_text is not None:
                 self._clear_selection_state()
             if self.trigger_switch is not None:
-                self.trigger_switch.hide()
+                self.trigger_switch.clear_selection()
             return False
 
-        if self.trigger_switch is not None:
-            self.trigger_switch.show_near_mouse()
+        selection_id = self._selection_identity(selected)
 
         if selected != self.selection_text:
             self._stop_speech()
             self.selection_text = selected
+            self.selection_id = selection_id
             self.selection_next_speak_at = 0.0
             print(f"Selected: {selected[:80]}")
+
+        if self.trigger_switch is not None:
+            self.trigger_switch.show_for_selection(selection_id)
 
         if self.trigger_mode == TRIGGER_OFF:
             self._stop_speech()
@@ -292,7 +343,13 @@ class HoverSpeaker:
         if self.selection_text is not None and self.speech_text == self.selection_text:
             self._stop_speech()
         self.selection_text = None
+        self.selection_id = None
         self.selection_next_speak_at = 0.0
+
+    def _selection_identity(self, selected: str) -> str:
+        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        bundle = app.bundleIdentifier() if app is not None else "unknown"
+        return f"{bundle}:{selected}"
 
     def _selected_text_from_frontmost_app(self) -> str | None:
         app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()

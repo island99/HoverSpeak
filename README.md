@@ -67,6 +67,8 @@ When text is highlighted, HoverSpeak shows a small three-stage switch beside the
 - `选`: speak only highlighted text.
 - `全`: speak highlighted text, and also speak nearby text when nothing is highlighted.
 
+The switch is placed once when a new text highlight is detected. It does not follow the mouse. Click anywhere outside the switch to hide it until the next highlighted text selection.
+
 List available voices:
 
 ```bash
