@@ -41,6 +41,9 @@ For the Python version, use the same environment variables:
 ```bash
 HOVERSPEAK_RATE=170 ./run.sh
 HOVERSPEAK_VOICE=Daniel ./run.sh
+HOVERSPEAK_TRIGGER_MODE=off ./run.sh
+HOVERSPEAK_TRIGGER_MODE=selection ./run.sh
+HOVERSPEAK_TRIGGER_MODE=both ./run.sh
 HOVERSPEAK_OCR=0 ./run.sh
 HOVERSPEAK_OCR_LANGUAGES=zh-Hans,en-US ./run.sh
 HOVERSPEAK_SELECTION=0 ./run.sh
@@ -57,6 +60,12 @@ OCR fallback is enabled by default. It helps with software that renders text vis
 `System Settings > Privacy & Security > Screen & System Audio Recording`
 
 Selection loop is enabled by default. Highlight text to repeatedly speak the selected text; clear the highlight to return to hover mode. The `Cmd+C` fallback defaults to `auto`: it helps with apps that do not expose selected text through Accessibility, but is disabled while an editable text field is focused.
+
+When text is highlighted, HoverSpeak shows a small three-stage switch beside the cursor:
+
+- `关`: never speak.
+- `选`: speak only highlighted text.
+- `全`: speak highlighted text, and also speak nearby text when nothing is highlighted.
 
 List available voices:
 

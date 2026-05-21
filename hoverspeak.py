@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import objc
 import re
 import signal
 import subprocess
@@ -17,6 +18,12 @@ POLL_INTERVAL = float(os.getenv("HOVERSPEAK_POLL", "0.28"))
 REPEAT_COOLDOWN = float(os.getenv("HOVERSPEAK_COOLDOWN", "1.4"))
 VOICE = os.getenv("HOVERSPEAK_VOICE")
 RATE = os.getenv("HOVERSPEAK_RATE", "185")
+TRIGGER_MODE = os.getenv("HOVERSPEAK_TRIGGER_MODE", "both").lower()
+TRIGGER_OFF = "off"
+TRIGGER_SELECTION = "selection"
+TRIGGER_BOTH = "both"
+TRIGGER_MODES = (TRIGGER_OFF, TRIGGER_SELECTION, TRIGGER_BOTH)
+TRIGGER_LABELS = ("关", "选", "全")
 SELECTION_ENABLED = os.getenv("HOVERSPEAK_SELECTION", "1") != "0"
 SELECTION_REPEAT_PAUSE = float(os.getenv("HOVERSPEAK_SELECTION_PAUSE", "0.8"))
 SELECTION_MAX_CHARS = int(os.getenv("HOVERSPEAK_SELECTION_MAX_CHARS", "1200"))
@@ -50,6 +57,86 @@ class SpokenWord:
     spoken_at: float
 
 
+class TriggerSwitchController(AppKit.NSObject):
+    def initWithSpeaker_(self, speaker):
+        self = objc.super(TriggerSwitchController, self).init()
+        if self is None:
+            return None
+
+        self.speaker = speaker
+        self.panel = None
+        self.control = None
+        self._build_panel()
+        return self
+
+    def _build_panel(self) -> None:
+        frame = AppKit.NSMakeRect(0, 0, 128, 34)
+        style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
+        self.panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            frame,
+            style,
+            AppKit.NSBackingStoreBuffered,
+            False,
+        )
+        self.panel.setLevel_(AppKit.NSFloatingWindowLevel)
+        self.panel.setOpaque_(False)
+        self.panel.setHasShadow_(True)
+        self.panel.setHidesOnDeactivate_(False)
+        self.panel.setIgnoresMouseEvents_(False)
+        self.panel.setBackgroundColor_(AppKit.NSColor.clearColor())
+        self.panel.setCollectionBehavior_(
+            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+            | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+        )
+
+        content = AppKit.NSVisualEffectView.alloc().initWithFrame_(frame)
+        content.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
+        content.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+        content.setState_(AppKit.NSVisualEffectStateActive)
+        content.setWantsLayer_(True)
+        content.layer().setCornerRadius_(17)
+        content.layer().setMasksToBounds_(True)
+
+        control = AppKit.NSSegmentedControl.alloc().initWithFrame_(AppKit.NSMakeRect(8, 5, 112, 24))
+        control.setSegmentCount_(3)
+        control.setTrackingMode_(AppKit.NSSegmentSwitchTrackingSelectOne)
+        for index, label in enumerate(TRIGGER_LABELS):
+            control.setLabel_forSegment_(label, index)
+            control.setWidth_forSegment_(36, index)
+        control.setSelectedSegment_(self.speaker.mode_index())
+        control.setTarget_(self)
+        control.setAction_("modeChanged:")
+        content.addSubview_(control)
+
+        self.control = control
+        self.panel.setContentView_(content)
+        self.panel.orderOut_(None)
+
+    def modeChanged_(self, sender):
+        self.speaker.set_trigger_mode(TRIGGER_MODES[sender.selectedSegment()])
+
+    def show_near_mouse(self) -> None:
+        if self.panel is None:
+            return
+
+        mouse = AppKit.NSEvent.mouseLocation()
+        frame = self.panel.frame()
+        screen = AppKit.NSScreen.mainScreen()
+        visible = screen.visibleFrame() if screen is not None else AppKit.NSMakeRect(0, 0, 1440, 900)
+        x = min(max(mouse.x + 18, visible.origin.x), visible.origin.x + visible.size.width - frame.size.width)
+        y = min(max(mouse.y - 14, visible.origin.y), visible.origin.y + visible.size.height - frame.size.height)
+        self.panel.setFrameOrigin_(AppKit.NSMakePoint(x, y))
+        self.panel.orderFrontRegardless()
+
+    def hide(self) -> None:
+        if self.panel is not None:
+            self.panel.orderOut_(None)
+
+    def sync(self) -> None:
+        if self.control is not None:
+            self.control.setSelectedSegment_(self.speaker.mode_index())
+
+
 class HoverSpeaker:
     def __init__(self) -> None:
         self.last_spoken: SpokenWord | None = None
@@ -60,8 +147,12 @@ class HoverSpeaker:
         self.last_selection_copy_at = 0.0
         self.accessibility_enabled = False
         self.warned_about_screenshot = False
+        self.trigger_mode = TRIGGER_MODE if TRIGGER_MODE in TRIGGER_MODES else TRIGGER_BOTH
+        self.app = None
+        self.trigger_switch = None
 
     def run(self) -> None:
+        self._setup_app()
         self.accessibility_enabled = self._request_accessibility_access()
         if not self.accessibility_enabled and not OCR_ENABLED:
             print(
@@ -72,6 +163,7 @@ class HoverSpeaker:
 
         print("HoverSpeak is running. Move the cursor over text. Press Ctrl+C to stop.")
         print("Tip: set HOVERSPEAK_VOICE=Daniel or HOVERSPEAK_RATE=170 before launching.")
+        print(f"Trigger mode: {self.trigger_mode}. Highlight text to show the three-stage switch.")
         if SELECTION_ENABLED:
             print("Selection loop is on. Highlight text to repeat it; clear the highlight to return to hover mode.")
             if SELECTION_COPY_MODE == "auto":
@@ -89,15 +181,52 @@ class HoverSpeaker:
         signal.signal(signal.SIGTERM, self._stop)
 
         while True:
-            if not self._handle_selected_text():
+            self._drain_app_events()
+            if not self._handle_selected_text() and self.trigger_mode == TRIGGER_BOTH:
                 self._speak_word_under_cursor()
             time.sleep(POLL_INTERVAL)
+
+    def _setup_app(self) -> None:
+        self.app = AppKit.NSApplication.sharedApplication()
+        self.app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+        self.trigger_switch = TriggerSwitchController.alloc().initWithSpeaker_(self)
+
+    def _drain_app_events(self) -> None:
+        if self.app is None:
+            return
+        while True:
+            event = self.app.nextEventMatchingMask_untilDate_inMode_dequeue_(
+                AppKit.NSEventMaskAny,
+                AppKit.NSDate.dateWithTimeIntervalSinceNow_(0),
+                AppKit.NSDefaultRunLoopMode,
+                True,
+            )
+            if event is None:
+                break
+            self.app.sendEvent_(event)
+            self.app.updateWindows()
+
+    def mode_index(self) -> int:
+        return TRIGGER_MODES.index(self.trigger_mode)
+
+    def set_trigger_mode(self, mode: str) -> None:
+        if mode not in TRIGGER_MODES or mode == self.trigger_mode:
+            return
+        self.trigger_mode = mode
+        if mode == TRIGGER_OFF:
+            self._stop_speech()
+        self.selection_next_speak_at = 0.0
+        if self.trigger_switch is not None:
+            self.trigger_switch.sync()
+        print(f"Trigger mode changed: {mode}")
 
     def _request_accessibility_access(self) -> bool:
         options = {AS.kAXTrustedCheckOptionPrompt: True}
         return bool(AS.AXIsProcessTrustedWithOptions(options))
 
     def _speak_word_under_cursor(self) -> None:
+        if self.trigger_mode != TRIGGER_BOTH:
+            return
         if self._is_speaking():
             return
 
@@ -128,13 +257,25 @@ class HoverSpeaker:
         if not selected:
             if self.selection_text is not None:
                 self._clear_selection_state()
+            if self.trigger_switch is not None:
+                self.trigger_switch.hide()
             return False
+
+        if self.trigger_switch is not None:
+            self.trigger_switch.show_near_mouse()
 
         if selected != self.selection_text:
             self._stop_speech()
             self.selection_text = selected
             self.selection_next_speak_at = 0.0
             print(f"Selected: {selected[:80]}")
+
+        if self.trigger_mode == TRIGGER_OFF:
+            self._stop_speech()
+            return True
+
+        if self.trigger_mode not in (TRIGGER_SELECTION, TRIGGER_BOTH):
+            return True
 
         if self._is_speaking():
             return True
