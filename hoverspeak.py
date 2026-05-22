@@ -15,15 +15,45 @@ import Vision
 
 
 POLL_INTERVAL = float(os.getenv("HOVERSPEAK_POLL", "0.28"))
+UI_TICK_INTERVAL = float(os.getenv("HOVERSPEAK_UI_TICK", "0.03"))
 REPEAT_COOLDOWN = float(os.getenv("HOVERSPEAK_COOLDOWN", "1.4"))
+HOVER_DWELL = float(os.getenv("HOVERSPEAK_HOVER_DWELL", "0.55"))
+HOVER_MOVE_TOLERANCE = float(os.getenv("HOVERSPEAK_HOVER_MOVE_TOLERANCE", "10"))
 VOICE = os.getenv("HOVERSPEAK_VOICE")
-RATE = os.getenv("HOVERSPEAK_RATE", "185")
+RATE = os.getenv("HOVERSPEAK_RATE")
+AUTO_VOICE = os.getenv("HOVERSPEAK_AUTO_VOICE", "1") != "0"
+DEFAULT_LATIN_RATE = os.getenv("HOVERSPEAK_LATIN_RATE", "175")
+DEFAULT_CJK_RATE = os.getenv("HOVERSPEAK_CJK_RATE", "158")
+CJK_VOICE_CANDIDATES = (
+    "Tingting",
+    "Eddy (中文（中国大陆）)",
+    "Flo (中文（中国大陆）)",
+    "Reed (中文（中国大陆）)",
+    "Meijia",
+)
+LATIN_VOICE_CANDIDATES = (
+    "Samantha",
+    "Ava",
+    "Eddy (英语（美国）)",
+    "Reed (英语（美国）)",
+    "Daniel",
+)
 TRIGGER_MODE = os.getenv("HOVERSPEAK_TRIGGER_MODE", "both").lower()
 TRIGGER_OFF = "off"
 TRIGGER_SELECTION = "selection"
 TRIGGER_BOTH = "both"
 TRIGGER_MODES = (TRIGGER_OFF, TRIGGER_SELECTION, TRIGGER_BOTH)
-TRIGGER_LABELS = ("关", "选", "全")
+TRIGGER_ICON_NAMES = ("speaker.slash.fill", "textformat", "speaker.wave.2.fill")
+TRIGGER_FALLBACK_MARKS = ("", "", "")
+TRIGGER_TOOLTIPS = ("关闭发声", "只读选中文本", "选中和鼠标附近文本")
+SWITCH_WIDTH = 58
+SWITCH_HEIGHT = 20
+SWITCH_PADDING_X = 2
+SWITCH_PADDING_Y = 2
+SWITCH_SEGMENT_WIDTH = 18
+SWITCH_AUTO_HIDE_SECONDS = float(os.getenv("HOVERSPEAK_SWITCH_AUTO_HIDE", "2.5"))
+CURSOR_REGION_DIAMETER = int(os.getenv("HOVERSPEAK_CURSOR_REGION", "82"))
+OCR_LINE_MAX_CHARS = int(os.getenv("HOVERSPEAK_OCR_LINE_MAX_CHARS", "24"))
 SELECTION_ENABLED = os.getenv("HOVERSPEAK_SELECTION", "1") != "0"
 SELECTION_REPEAT_PAUSE = float(os.getenv("HOVERSPEAK_SELECTION_PAUSE", "0.8"))
 SELECTION_MAX_CHARS = int(os.getenv("HOVERSPEAK_SELECTION_MAX_CHARS", "1200"))
@@ -35,6 +65,7 @@ OCR_HEIGHT = int(os.getenv("HOVERSPEAK_OCR_HEIGHT", "96"))
 OCR_ACCURATE = os.getenv("HOVERSPEAK_OCR_ACCURATE", "1") != "0"
 OCR_LANGUAGES = [lang.strip() for lang in os.getenv("HOVERSPEAK_OCR_LANGUAGES", "zh-Hans,en-US").split(",") if lang.strip()]
 OCR_MIN_TEXT_HEIGHT = float(os.getenv("HOVERSPEAK_OCR_MIN_TEXT_HEIGHT", "0.015"))
+OCR_Y_OFFSET = float(os.getenv("HOVERSPEAK_OCR_Y_OFFSET", "0"))
 CJK_PHRASE_CHARS = int(os.getenv("HOVERSPEAK_CJK_CHARS", "2"))
 DEBUG = os.getenv("HOVERSPEAK_DEBUG", "0") == "1"
 CJK_RANGES = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af"
@@ -68,6 +99,8 @@ class TriggerSwitchController(AppKit.NSObject):
         self.control = None
         self.current_selection_id = None
         self.dismissed_selection_id = None
+        self.shown_at = 0.0
+        self.was_clicked = False
         self.mouse_monitor = AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             AppKit.NSEventMaskLeftMouseDown | AppKit.NSEventMaskRightMouseDown,
             self._handle_global_mouse_down,
@@ -76,7 +109,7 @@ class TriggerSwitchController(AppKit.NSObject):
         return self
 
     def _build_panel(self) -> None:
-        frame = AppKit.NSMakeRect(0, 0, 128, 34)
+        frame = AppKit.NSMakeRect(0, 0, SWITCH_WIDTH, SWITCH_HEIGHT)
         style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
         self.panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             frame,
@@ -100,15 +133,22 @@ class TriggerSwitchController(AppKit.NSObject):
         content.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
         content.setState_(AppKit.NSVisualEffectStateActive)
         content.setWantsLayer_(True)
-        content.layer().setCornerRadius_(17)
+        content.layer().setCornerRadius_(SWITCH_HEIGHT / 2)
         content.layer().setMasksToBounds_(True)
 
-        control = AppKit.NSSegmentedControl.alloc().initWithFrame_(AppKit.NSMakeRect(8, 5, 112, 24))
+        control = AppKit.NSSegmentedControl.alloc().initWithFrame_(
+            AppKit.NSMakeRect(
+                SWITCH_PADDING_X,
+                SWITCH_PADDING_Y,
+                SWITCH_WIDTH - SWITCH_PADDING_X * 2,
+                SWITCH_HEIGHT - SWITCH_PADDING_Y * 2,
+            )
+        )
         control.setSegmentCount_(3)
         control.setTrackingMode_(AppKit.NSSegmentSwitchTrackingSelectOne)
-        for index, label in enumerate(TRIGGER_LABELS):
-            control.setLabel_forSegment_(label, index)
-            control.setWidth_forSegment_(36, index)
+        for index, tooltip in enumerate(TRIGGER_TOOLTIPS):
+            self._configure_segment(control, index, tooltip)
+            control.setWidth_forSegment_(SWITCH_SEGMENT_WIDTH, index)
         control.setSelectedSegment_(self.speaker.mode_index())
         control.setTarget_(self)
         control.setAction_("modeChanged:")
@@ -118,8 +158,24 @@ class TriggerSwitchController(AppKit.NSObject):
         self.panel.setContentView_(content)
         self.panel.orderOut_(None)
 
+    def _configure_segment(self, control, index: int, tooltip: str) -> None:
+        symbol_name = TRIGGER_ICON_NAMES[index]
+        if hasattr(AppKit.NSImage, "imageWithSystemSymbolName_accessibilityDescription_"):
+            image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol_name, tooltip)
+            if image is not None:
+                image.setTemplate_(True)
+                image.setSize_(AppKit.NSMakeSize(11, 11))
+                control.setImage_forSegment_(image, index)
+                control.setToolTip_forSegment_(tooltip, index)
+                return
+
+        control.setLabel_forSegment_(TRIGGER_FALLBACK_MARKS[index], index)
+        control.setToolTip_forSegment_(tooltip, index)
+
     def modeChanged_(self, sender):
+        self.was_clicked = True
         self.speaker.set_trigger_mode(TRIGGER_MODES[sender.selectedSegment()])
+        self.dismiss_current_selection()
 
     def show_for_selection(self, selection_id: str) -> None:
         if self.panel is None:
@@ -130,12 +186,14 @@ class TriggerSwitchController(AppKit.NSObject):
             return
 
         self.current_selection_id = selection_id
+        self.was_clicked = False
+        self.shown_at = time.monotonic()
         mouse = AppKit.NSEvent.mouseLocation()
         frame = self.panel.frame()
         screen = AppKit.NSScreen.mainScreen()
         visible = screen.visibleFrame() if screen is not None else AppKit.NSMakeRect(0, 0, 1440, 900)
-        x = min(max(mouse.x + 18, visible.origin.x), visible.origin.x + visible.size.width - frame.size.width)
-        y = min(max(mouse.y - 14, visible.origin.y), visible.origin.y + visible.size.height - frame.size.height)
+        x = min(max(mouse.x + 12, visible.origin.x), visible.origin.x + visible.size.width - frame.size.width)
+        y = min(max(mouse.y - 8, visible.origin.y), visible.origin.y + visible.size.height - frame.size.height)
         self.panel.setFrameOrigin_(AppKit.NSMakePoint(x, y))
         self.panel.orderFrontRegardless()
 
@@ -148,9 +206,21 @@ class TriggerSwitchController(AppKit.NSObject):
             self.dismissed_selection_id = self.current_selection_id
         self.hide()
 
+    def auto_hide_if_idle(self) -> None:
+        if SWITCH_AUTO_HIDE_SECONDS <= 0:
+            return
+        if self.panel is None or not self.panel.isVisible():
+            return
+        if self.was_clicked or self.current_selection_id is None:
+            return
+        if time.monotonic() - self.shown_at >= SWITCH_AUTO_HIDE_SECONDS:
+            self.dismiss_current_selection()
+
     def clear_selection(self) -> None:
         self.current_selection_id = None
         self.dismissed_selection_id = None
+        self.shown_at = 0.0
+        self.was_clicked = False
         self.hide()
 
     def sync(self) -> None:
@@ -179,6 +249,86 @@ class TriggerSwitchController(AppKit.NSObject):
         )
 
 
+class CursorRegionOverlay:
+    def __init__(self) -> None:
+        self.panel = None
+        self.mouse_monitor = AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            AppKit.NSEventMaskMouseMoved | AppKit.NSEventMaskLeftMouseDragged | AppKit.NSEventMaskRightMouseDragged,
+            self._handle_mouse_move,
+        )
+        self._build_panel()
+
+    def _build_panel(self) -> None:
+        frame = AppKit.NSMakeRect(0, 0, CURSOR_REGION_DIAMETER, CURSOR_REGION_DIAMETER)
+        style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
+        self.panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            frame,
+            style,
+            AppKit.NSBackingStoreBuffered,
+            False,
+        )
+        self.panel.setLevel_(AppKit.NSFloatingWindowLevel)
+        self.panel.setOpaque_(False)
+        self.panel.setHasShadow_(False)
+        self.panel.setHidesOnDeactivate_(False)
+        self.panel.setIgnoresMouseEvents_(True)
+        self.panel.setBackgroundColor_(AppKit.NSColor.clearColor())
+        self.panel.setSharingType_(AppKit.NSWindowSharingNone)
+        self.panel.setCollectionBehavior_(
+            AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+            | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary
+        )
+
+        content = AppKit.NSView.alloc().initWithFrame_(frame)
+        content.setWantsLayer_(True)
+        layer = content.layer()
+        layer.setCornerRadius_(CURSOR_REGION_DIAMETER / 2)
+        layer.setMasksToBounds_(True)
+        layer.setBorderWidth_(0)
+
+        self.panel.setContentView_(content)
+        self.set_ready_(False)
+        self.panel.orderOut_(None)
+
+    def update(self) -> None:
+        if self.panel is None:
+            return
+        mouse = AppKit.NSEvent.mouseLocation()
+        origin = AppKit.NSMakePoint(
+            mouse.x - CURSOR_REGION_DIAMETER / 2,
+            mouse.y - CURSOR_REGION_DIAMETER / 2,
+        )
+        self.panel.setFrameOrigin_(origin)
+        self.panel.orderFrontRegardless()
+
+    def _handle_mouse_move(self, _event) -> None:
+        if self.is_visible():
+            self.update()
+
+    def hide(self) -> None:
+        if self.panel is not None:
+            self.panel.orderOut_(None)
+
+    def is_visible(self) -> bool:
+        return bool(self.panel is not None and self.panel.isVisible())
+
+    def set_ready_(self, ready: bool) -> None:
+        if self.panel is None or self.panel.contentView() is None:
+            return
+        color = (
+            AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.28, 0.88, 0.62, 1)
+            if ready
+            else AppKit.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.20, 0.68, 0.92, 1)
+        )
+        layer = self.panel.contentView().layer()
+        layer.setBorderWidth_(0)
+        layer.setBackgroundColor_(color.colorWithAlphaComponent_(0.09 if not ready else 0.14).CGColor())
+        layer.setBorderColor_(AppKit.NSColor.clearColor().CGColor())
+
+    def window_number(self) -> int:
+        return int(self.panel.windowNumber()) if self.panel is not None else Quartz.kCGNullWindowID
+
+
 class HoverSpeaker:
     def __init__(self) -> None:
         self.last_spoken: SpokenWord | None = None
@@ -188,11 +338,14 @@ class HoverSpeaker:
         self.selection_id: str | None = None
         self.selection_next_speak_at = 0.0
         self.last_selection_copy_at = 0.0
+        self.hover_candidate: tuple[str, str, float, object] | None = None
         self.accessibility_enabled = False
         self.warned_about_screenshot = False
         self.trigger_mode = TRIGGER_MODE if TRIGGER_MODE in TRIGGER_MODES else TRIGGER_BOTH
         self.app = None
         self.trigger_switch = None
+        self.cursor_overlay = None
+        self.available_voices: set[str] | None = None
 
     def run(self) -> None:
         self._setup_app()
@@ -205,7 +358,7 @@ class HoverSpeaker:
             sys.exit(1)
 
         print("HoverSpeak is running. Move the cursor over text. Press Ctrl+C to stop.")
-        print("Tip: set HOVERSPEAK_VOICE=Daniel or HOVERSPEAK_RATE=170 before launching.")
+        print("Tip: set HOVERSPEAK_VOICE=Daniel or HOVERSPEAK_CJK_RATE=150 before launching.")
         print(f"Trigger mode: {self.trigger_mode}. Highlight text to show the three-stage switch.")
         if SELECTION_ENABLED:
             print("Selection loop is on. Highlight text to repeat it; clear the highlight to return to hover mode.")
@@ -223,16 +376,29 @@ class HoverSpeaker:
         signal.signal(signal.SIGINT, self._stop)
         signal.signal(signal.SIGTERM, self._stop)
 
+        has_selection = False
+        next_poll_at = 0.0
         while True:
             self._drain_app_events()
-            if not self._handle_selected_text() and self.trigger_mode == TRIGGER_BOTH:
-                self._speak_word_under_cursor()
-            time.sleep(POLL_INTERVAL)
+            if self.trigger_switch is not None:
+                self.trigger_switch.auto_hide_if_idle()
+            self._update_cursor_overlay(has_selection)
+
+            now = time.monotonic()
+            if now >= next_poll_at:
+                has_selection = self._handle_selected_text()
+                self._update_cursor_overlay(has_selection)
+                if not has_selection and self.trigger_mode == TRIGGER_BOTH:
+                    self._speak_word_under_cursor()
+                next_poll_at = now + POLL_INTERVAL
+
+            time.sleep(UI_TICK_INTERVAL)
 
     def _setup_app(self) -> None:
         self.app = AppKit.NSApplication.sharedApplication()
         self.app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
         self.trigger_switch = TriggerSwitchController.alloc().initWithSpeaker_(self)
+        self.cursor_overlay = CursorRegionOverlay()
 
     def _drain_app_events(self) -> None:
         if self.app is None:
@@ -264,9 +430,32 @@ class HoverSpeaker:
         if mode == TRIGGER_OFF:
             self._stop_speech()
         self.selection_next_speak_at = 0.0
+        self.hover_candidate = None
         if self.trigger_switch is not None:
             self.trigger_switch.sync()
+        if mode != TRIGGER_BOTH and self.cursor_overlay is not None:
+            self.cursor_overlay.hide()
         print(f"Trigger mode changed: {mode}")
+
+    def _update_cursor_overlay(self, has_selection: bool) -> None:
+        if self.cursor_overlay is None:
+            return
+        if self.trigger_mode == TRIGGER_BOTH and not has_selection:
+            self.cursor_overlay.update()
+            if not self._hover_candidate_is_ready_at_current_mouse():
+                self.cursor_overlay.set_ready_(False)
+        else:
+            self.cursor_overlay.hide()
+
+    def _hover_candidate_is_ready_at_current_mouse(self) -> bool:
+        if self.hover_candidate is None:
+            return False
+        _word, _description, candidate_started_at, candidate_point = self.hover_candidate
+        current_point = self._mouse_point_for_accessibility()
+        return (
+            time.monotonic() - candidate_started_at >= HOVER_DWELL
+            and self._distance_between_points(candidate_point, current_point) <= HOVER_MOVE_TOLERANCE
+        )
 
     def _request_accessibility_access(self) -> bool:
         options = {AS.kAXTrustedCheckOptionPrompt: True}
@@ -281,13 +470,24 @@ class HoverSpeaker:
         point = self._mouse_point_for_accessibility()
         word, description = None, "accessibility:disabled"
         if self.accessibility_enabled:
-            word, description = self._accessibility_word_under_cursor(point)
+            word, description = self._accessibility_text_inside_cursor_region(point)
         if not word and OCR_ENABLED:
             word = self._ocr_word_under_cursor(point)
-            description = f"ocr:{int(point.x)}:{int(point.y)}"
+            description = f"ocr-region:{int(point.x)}:{int(point.y)}"
 
         if not word or not self._is_speakable(word):
+            self.hover_candidate = None
+            if self.cursor_overlay is not None:
+                self.cursor_overlay.set_ready_(False)
             return
+
+        if not self._hover_candidate_has_dwelled(word, description, point):
+            if self.cursor_overlay is not None:
+                self.cursor_overlay.set_ready_(False)
+            return
+
+        if self.cursor_overlay is not None:
+            self.cursor_overlay.set_ready_(True)
 
         if self._should_skip(word, description):
             return
@@ -295,6 +495,24 @@ class HoverSpeaker:
         self._speak(word)
         self.last_spoken = SpokenWord(word, description, time.monotonic())
         print(f"Spoke: {word}")
+
+    def _hover_candidate_has_dwelled(self, word: str, description: str, point) -> bool:
+        now = time.monotonic()
+        if self.hover_candidate is None:
+            self.hover_candidate = (word, description, now, point)
+            return False
+
+        candidate_word, candidate_description, candidate_started_at, candidate_point = self.hover_candidate
+        same_target = (
+            candidate_word.casefold() == word.casefold()
+            and candidate_description == description
+            and self._distance_between_points(candidate_point, point) <= HOVER_MOVE_TOLERANCE
+        )
+        if not same_target:
+            self.hover_candidate = (word, description, now, point)
+            return False
+
+        return now - candidate_started_at >= HOVER_DWELL
 
     def _handle_selected_text(self) -> bool:
         if not SELECTION_ENABLED or not self.accessibility_enabled:
@@ -313,6 +531,7 @@ class HoverSpeaker:
 
         if selected != self.selection_text:
             self._stop_speech()
+            self.hover_candidate = None
             self.selection_text = selected
             self.selection_id = selection_id
             self.selection_next_speak_at = 0.0
@@ -345,6 +564,7 @@ class HoverSpeaker:
         self.selection_text = None
         self.selection_id = None
         self.selection_next_speak_at = 0.0
+        self.hover_candidate = None
 
     def _selection_identity(self, selected: str) -> str:
         app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
@@ -508,6 +728,27 @@ class HoverSpeaker:
 
         return None, self._describe(element)
 
+    def _accessibility_text_inside_cursor_region(self, point) -> tuple[str | None, str]:
+        system = AS.AXUIElementCreateSystemWide()
+        result, element = AS.AXUIElementCopyElementAtPosition(system, point.x, point.y, None)
+        if result != AS.kAXErrorSuccess or element is None:
+            return None, "accessibility:none"
+
+        for candidate in self._candidate_elements_at_point(point, element):
+            text = self._string_attribute(candidate, AS.kAXValueAttribute)
+            text = text or self._string_attribute(candidate, AS.kAXTitleAttribute)
+            text = text or self._string_attribute(candidate, AS.kAXDescriptionAttribute)
+            if not text:
+                continue
+
+            region_text = self._text_inside_region_by_bounds(point, candidate, text)
+            if DEBUG:
+                self._debug_element(candidate, point, region_text)
+            if region_text:
+                return region_text, self._describe(candidate)
+
+        return None, self._describe(element)
+
     def _ocr_word_under_cursor(self, point) -> str | None:
         image = self._screenshot_around(point)
         if image is None:
@@ -549,12 +790,19 @@ class HoverSpeaker:
             OCR_WIDTH,
             OCR_HEIGHT,
         )
+        capture_options = Quartz.kCGWindowListOptionOnScreenOnly
+        window_id = Quartz.kCGNullWindowID
+        if self.cursor_overlay is not None and self.cursor_overlay.is_visible():
+            capture_options = Quartz.kCGWindowListOptionOnScreenBelowWindow
+            window_id = self.cursor_overlay.window_number()
+
         image = Quartz.CGWindowListCreateImage(
             crop,
-            Quartz.kCGWindowListOptionOnScreenOnly,
-            Quartz.kCGNullWindowID,
+            capture_options,
+            window_id,
             Quartz.kCGWindowImageDefault,
         )
+
         if image is None and not self.warned_about_screenshot:
             print(
                 "OCR could not capture the screen. Enable Screen Recording for this terminal app "
@@ -571,15 +819,36 @@ class HoverSpeaker:
     def _word_near_point(self, lines: list[tuple[str, object]], point, crop_origin) -> str | None:
         best_word = None
         best_score = float("inf")
+        best_line = None
+        best_line_score = float("inf")
 
         for text, box in lines:
-            tokens = list(self._token_spans(text))
-            if not tokens:
+            text = text.strip()
+            if not text:
                 continue
 
             line_rect = self._vision_box_to_screen_rect(box, crop_origin)
-            for start, end, token in tokens:
-                token_rect = self._estimate_token_rect(line_rect, text, start, end)
+            if not self._line_is_vertically_near_cursor(line_rect, point):
+                continue
+
+            line_text = self._line_text_inside_region(text, line_rect, point)
+            if line_text:
+                score = self._distance_between_points(self._rect_center(line_rect), point)
+                if score < best_line_score:
+                    best_line_score = score
+                    best_line = line_text
+
+            tokens = list(TOKEN_RE.finditer(text))
+            if not tokens:
+                continue
+
+            for match in tokens:
+                token = match.group(0).strip()
+                if not token:
+                    continue
+                token_rect = self._estimate_token_rect(line_rect, text, match.start(), match.end())
+                if not self._rect_intersects_cursor_region(token_rect, point):
+                    continue
                 score = self._distance_to_rect(token_rect, point)
                 if self._rect_contains(token_rect, point):
                     score = 0
@@ -587,11 +856,95 @@ class HoverSpeaker:
                     best_score = score
                     best_word = token.strip()
 
+        if best_line:
+            return best_line
         return best_word
+
+    def _line_is_vertically_near_cursor(self, line_rect, point) -> bool:
+        line_center_y = line_rect.origin.y + line_rect.size.height / 2
+        tolerance = max(8, min(CURSOR_REGION_DIAMETER * 0.22, line_rect.size.height * 1.45))
+        return abs(line_center_y - point.y) <= tolerance
+
+    def _line_text_inside_region(self, text: str, line_rect, point) -> str | None:
+        cleaned = re.sub(r"\s+", " ", text).strip()
+        if not cleaned:
+            return None
+
+        segments = []
+        segment_start = None
+        segment_chars = []
+        for index, char in enumerate(text):
+            inside = self._char_rect_is_inside_region(line_rect, text, index, point)
+            if inside:
+                if segment_start is None:
+                    segment_start = index
+                segment_chars.append(char)
+                continue
+
+            if segment_start is not None:
+                segments.append((segment_start, index, "".join(segment_chars)))
+                segment_start = None
+                segment_chars = []
+
+        if segment_start is not None:
+            segments.append((segment_start, len(text), "".join(segment_chars)))
+
+        candidates = []
+        for start, end, segment in segments:
+            segment = self._trim_partial_latin_edges(text, start, end, segment)
+            segment = re.sub(r"\s+", " ", segment).strip()
+            segment = segment.strip(" ,.;:!?，。！？；：、")
+            if self._is_speakable_line(segment):
+                candidates.append(segment)
+
+        if not candidates:
+            return None
+
+        return max(candidates, key=len)
+
+    def _char_rect_is_inside_region(self, line_rect, text: str, index: int, point) -> bool:
+        length = max(len(text), 1)
+        char_width = line_rect.size.width / length
+        char_rect = Quartz.CGRectMake(
+            line_rect.origin.x + char_width * index,
+            line_rect.origin.y,
+            char_width,
+            line_rect.size.height,
+        )
+        return self._rect_intersects_cursor_region(char_rect, point)
+
+    def _rect_center_is_inside_region(self, rect, point) -> bool:
+        center = self._rect_center(rect)
+        radius = CURSOR_REGION_DIAMETER / 2
+        return self._distance_between_points(center, point) <= radius
+
+    def _rect_intersects_cursor_region(self, rect, point) -> bool:
+        radius = CURSOR_REGION_DIAMETER / 2
+        closest_x = min(max(point.x, rect.origin.x), rect.origin.x + rect.size.width)
+        closest_y = min(max(point.y, rect.origin.y), rect.origin.y + rect.size.height)
+        closest = Quartz.CGPoint(closest_x, closest_y)
+        return self._distance_between_points(closest, point) <= radius
+
+    def _trim_partial_latin_edges(self, text: str, start: int, end: int, segment: str) -> str:
+        if not segment:
+            return segment
+
+        trimmed = segment
+        if start > 0 and self._is_latin_word_char(text[start - 1]):
+            trimmed = re.sub(rf"^[^\W_{CJK_RANGES}]+(?:['-]?)", "", trimmed, flags=re.UNICODE)
+        if end < len(text) and self._is_latin_word_char(text[end]):
+            trimmed = re.sub(rf"(?:['-]?)[^\W_{CJK_RANGES}]+$", "", trimmed, flags=re.UNICODE)
+        return trimmed
+
+    def _is_latin_word_char(self, char: str) -> bool:
+        return bool(char and re.match(rf"[^\W_{CJK_RANGES}'-]", char, re.UNICODE))
+
+    def _is_speakable_line(self, text: str) -> bool:
+        return 2 <= len(text) <= OCR_LINE_MAX_CHARS and any(ch.isalpha() for ch in text)
 
     def _vision_box_to_screen_rect(self, box, crop_origin):
         x = crop_origin.x + box.origin.x * OCR_WIDTH
-        y = crop_origin.y + (1 - box.origin.y - box.size.height) * OCR_HEIGHT
+        y = crop_origin.y + (1 - box.origin.y - box.size.height) * OCR_HEIGHT + OCR_Y_OFFSET
         width = box.size.width * OCR_WIDTH
         height = box.size.height * OCR_HEIGHT
         return Quartz.CGRectMake(x, y, width, height)
@@ -714,6 +1067,59 @@ class HoverSpeaker:
 
         return best_word
 
+    def _text_inside_region_by_bounds(self, point, element, text: str) -> str | None:
+        pieces = []
+        for start, end, candidate in self._region_text_spans(text):
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+
+            bounds = self._bounds_for_range(element, start, end - start)
+            if bounds is None:
+                continue
+            if not self._rect_intersects_cursor_region(bounds, point):
+                continue
+
+            center = self._rect_center(bounds)
+            pieces.append((center.y, center.x, start, candidate, self._is_cjk(candidate)))
+
+        if not pieces:
+            return None
+
+        pieces.sort(key=lambda item: (round(item[0] / 8), item[1], item[2]))
+        text_inside = self._join_region_pieces(pieces)
+        text_inside = re.sub(r"\s+", " ", text_inside).strip()
+        text_inside = text_inside.strip(" ,.;:!?，。！？；：、")
+        return text_inside if self._is_speakable_line(text_inside) else None
+
+    def _region_text_spans(self, text: str):
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if self._is_cjk(char):
+                yield index, index + 1, char
+                index += 1
+                continue
+
+            match = LATIN_WORD_RE.match(text, index)
+            if match is not None:
+                yield match.start(), match.end(), match.group(0)
+                index = match.end()
+                continue
+
+            index += 1
+
+    def _join_region_pieces(self, pieces) -> str:
+        output = []
+        previous_is_cjk = False
+        for _y, _x, _start, text, is_cjk in pieces:
+            if not output or (previous_is_cjk and is_cjk):
+                output.append(text)
+            else:
+                output.append(" " + text)
+            previous_is_cjk = is_cjk
+        return "".join(output)
+
     def _bounds_for_range(self, element, location: int, length: int):
         range_value = AS.AXValueCreate(AS.kAXValueCFRangeType, (location, length))
         result, raw_bounds = AS.AXUIElementCopyParameterizedAttributeValue(
@@ -748,6 +1154,12 @@ class HoverSpeaker:
             and rect.origin.y <= point.y <= rect.origin.y + rect.size.height
         )
 
+    def _rect_center(self, rect):
+        return Quartz.CGPoint(
+            rect.origin.x + rect.size.width / 2,
+            rect.origin.y + rect.size.height / 2,
+        )
+
     def _distance_to_rect(self, rect, point) -> float:
         left = rect.origin.x
         right = rect.origin.x + rect.size.width
@@ -755,6 +1167,11 @@ class HoverSpeaker:
         bottom = rect.origin.y + rect.size.height
         dx = max(left - point.x, 0, point.x - right)
         dy = max(top - point.y, 0, point.y - bottom)
+        return (dx * dx + dy * dy) ** 0.5
+
+    def _distance_between_points(self, first, second) -> float:
+        dx = first.x - second.x
+        dy = first.y - second.y
         return (dx * dx + dy * dy) ** 0.5
 
     def _string_attribute(self, element, attribute) -> str | None:
@@ -856,12 +1273,63 @@ class HoverSpeaker:
     def _speak(self, word: str) -> None:
         self._stop_speech()
 
-        args = ["/usr/bin/say", "-r", RATE]
-        if VOICE:
-            args.extend(["-v", VOICE])
-        args.append(word)
+        speech_text = self._naturalize_text_for_speech(word)
+        args = ["/usr/bin/say", "-r", self._rate_for_text(speech_text)]
+        voice = self._voice_for_text(speech_text)
+        if voice:
+            args.extend(["-v", voice])
+        args.append(speech_text)
         self.speech_process = subprocess.Popen(args)
-        self.speech_text = word
+        self.speech_text = speech_text
+
+    def _naturalize_text_for_speech(self, text: str) -> str:
+        text = re.sub(r"\s+", " ", text).strip()
+        text = text.strip(" ,.;:!?，。！？；：、")
+        if not text:
+            return text
+
+        if not re.search(r"[。！？.!?]$", text):
+            text += "。" if self._is_cjk(text) else "."
+        return text
+
+    def _rate_for_text(self, text: str) -> str:
+        if RATE:
+            return RATE
+        return DEFAULT_CJK_RATE if self._is_cjk(text) else DEFAULT_LATIN_RATE
+
+    def _voice_for_text(self, text: str) -> str | None:
+        if VOICE:
+            return VOICE
+        if not AUTO_VOICE:
+            return None
+
+        voices = self._available_voice_names()
+        candidates = CJK_VOICE_CANDIDATES if self._is_cjk(text) else LATIN_VOICE_CANDIDATES
+        for candidate in candidates:
+            if candidate in voices:
+                return candidate
+        return None
+
+    def _available_voice_names(self) -> set[str]:
+        if self.available_voices is not None:
+            return self.available_voices
+
+        voices: set[str] = set()
+        try:
+            output = subprocess.check_output(
+                ["/usr/bin/say", "-v", "?"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
+            for line in output.splitlines():
+                match = re.match(r"^(.*?)\s+[a-z]{2}(?:_[A-Z0-9]+)?\s+#", line)
+                if match:
+                    voices.add(match.group(1).strip())
+        except Exception:
+            voices = set()
+
+        self.available_voices = voices
+        return voices
 
     def _is_speaking(self) -> bool:
         if self.speech_process is None:

@@ -1,10 +1,24 @@
 # HoverSpeak
 
-HoverSpeak is a tiny macOS prototype that speaks a word when your cursor hovers over selectable text.
+HoverSpeak is a small macOS desktop helper that speaks text when you hover near it or highlight/select it.
 
-## Run the Python version
+It is useful for quick word pronunciation, listening to short sentences, and reading text inside apps. Speech is handled locally through macOS `say`; no network connection is required.
 
-This is the recommended route in the current workspace because the installed macOS Command Line Tools have a Swift compiler/SDK mismatch.
+中文说明：[README.zh-CN.md](README.zh-CN.md)
+
+## Features
+
+- Nearby text speaking: hover near text for a short moment and HoverSpeak reads the text inside the cursor region.
+- Highlighted text loop: highlight/select text and HoverSpeak repeatedly reads that selection.
+- Three-stage trigger switch: a compact switch appears near the cursor after text is highlighted.
+- Cursor region indicator: when nearby text speaking is enabled, a translucent circular region appears near the cursor.
+- Dwell feedback: the region starts as soft cyan-blue and turns soft mint-green once the current text is ready to speak.
+- OCR fallback: apps that do not expose standard text through Accessibility can still be read through screen OCR.
+- Chinese and English voices: HoverSpeak can pick a local Chinese or English voice based on the text, with a slower default rate for Chinese snippets.
+
+## Recommended Setup
+
+The Python version is currently recommended. The Swift version is still included, but some macOS Command Line Tools installations may hit a Swift compiler/SDK mismatch.
 
 ```bash
 cd HoverSpeak
@@ -13,70 +27,121 @@ python3 -m venv .venv
 .venv/bin/python hoverspeak.py
 ```
 
+You can also use the included launcher:
+
+```bash
+./run.sh
+```
+
+## macOS Permissions
+
 On first launch, macOS should ask for Accessibility permission. If it does not, open:
 
-`System Settings > Privacy & Security > Accessibility`
+```text
+System Settings > Privacy & Security > Accessibility
+```
 
-Then enable the terminal app you launched HoverSpeak from, such as Terminal, iTerm, or Codex.
+Enable the app you used to launch HoverSpeak, such as Terminal, iTerm, or Codex.
 
-## Run the Swift version
+OCR also requires Screen Recording permission:
+
+```text
+System Settings > Privacy & Security > Screen & System Audio Recording
+```
+
+Enable the same launcher app there.
+
+## Three-Stage Switch
+
+When text is highlighted, HoverSpeak shows a small switch beside the cursor:
+
+- Muted speaker icon: never speak.
+- Text icon: speak only highlighted/selected text.
+- Speaker icon: speak highlighted text and nearby text when nothing is highlighted.
+
+The switch is placed once for each new highlight and does not follow the cursor. Clicking a switch option changes the mode and hides the switch immediately. If it is not clicked, it hides automatically after 2.5 seconds by default. Clicking outside the switch also hides it until the next highlighted text selection.
+
+## Nearby Text Speaking
+
+When the switch is in "highlight + nearby text" mode and no text is highlighted, HoverSpeak shows a translucent circular region near the cursor.
+
+HoverSpeak tries to speak only the text inside that circle:
+
+- Chinese text is clipped by character position.
+- English text is handled as whole words when possible; clipped edge fragments are dropped.
+- OCR prefers the cursor's current text row, reducing accidental reads from the row above or below.
+- The cursor must dwell on the same candidate text before speech starts, which reduces misreads while moving.
+
+If the OCR result feels consistently shifted up or down on your display, tune it with `HOVERSPEAK_OCR_Y_OFFSET`.
+
+## Common Options
+
+Prefix `./run.sh` with any of these environment variables:
+
+```bash
+HOVERSPEAK_TRIGGER_MODE=off ./run.sh
+HOVERSPEAK_TRIGGER_MODE=selection ./run.sh
+HOVERSPEAK_TRIGGER_MODE=both ./run.sh
+
+HOVERSPEAK_CJK_RATE=150 ./run.sh
+HOVERSPEAK_LATIN_RATE=170 ./run.sh
+HOVERSPEAK_VOICE=Daniel ./run.sh
+HOVERSPEAK_AUTO_VOICE=0 ./run.sh
+
+HOVERSPEAK_CURSOR_REGION=72 ./run.sh
+HOVERSPEAK_HOVER_DWELL=0.8 ./run.sh
+HOVERSPEAK_SWITCH_AUTO_HIDE=2.5 ./run.sh
+
+HOVERSPEAK_OCR=0 ./run.sh
+HOVERSPEAK_OCR_LANGUAGES=zh-Hans,en-US ./run.sh
+HOVERSPEAK_OCR_WIDTH=300 HOVERSPEAK_OCR_HEIGHT=80 ./run.sh
+HOVERSPEAK_OCR_LINE_MAX_CHARS=18 ./run.sh
+HOVERSPEAK_OCR_Y_OFFSET=4 ./run.sh
+
+HOVERSPEAK_SELECTION=0 ./run.sh
+HOVERSPEAK_SELECTION_PAUSE=1.2 ./run.sh
+HOVERSPEAK_SELECTION_COPY=auto ./run.sh
+HOVERSPEAK_SELECTION_COPY=0 ./run.sh
+HOVERSPEAK_SELECTION_COPY=1 ./run.sh
+```
+
+### Option Reference
+
+| Variable | Purpose |
+| --- | --- |
+| `HOVERSPEAK_TRIGGER_MODE` | Initial trigger mode: `off`, `selection`, or `both` |
+| `HOVERSPEAK_CJK_RATE` | Chinese speech rate |
+| `HOVERSPEAK_LATIN_RATE` | English/Latin speech rate |
+| `HOVERSPEAK_VOICE` | Force a specific macOS voice |
+| `HOVERSPEAK_AUTO_VOICE` | Automatically choose Chinese or English voice based on text |
+| `HOVERSPEAK_CURSOR_REGION` | Diameter of the nearby-text cursor circle |
+| `HOVERSPEAK_HOVER_DWELL` | How long the cursor must stay before nearby text is spoken |
+| `HOVERSPEAK_SWITCH_AUTO_HIDE` | Seconds before the highlight switch hides automatically; set `0` to disable |
+| `HOVERSPEAK_OCR` | Enable or disable OCR |
+| `HOVERSPEAK_OCR_Y_OFFSET` | Vertical calibration for OCR results |
+| `HOVERSPEAK_SELECTION_PAUSE` | Repeat interval for highlighted text |
+| `HOVERSPEAK_SELECTION_COPY` | Clipboard fallback for selected text: `auto`, `0`, or `1` |
+
+List available system voices:
+
+```bash
+say -v '?'
+```
+
+## Swift Version
+
+If your Xcode or Command Line Tools environment is compatible, you can try:
 
 ```bash
 cd HoverSpeak
 swift run
 ```
 
-If `swift run` fails with a Swift compiler/SDK mismatch, install or select a matching Xcode/Command Line Tools version, or use the Python version above.
+If you hit a Swift compiler/SDK mismatch, use the Python version instead.
 
-## Options
+## Current Limitations
 
-```bash
-HOVERSPEAK_RATE=170 swift run
-HOVERSPEAK_VOICE=Daniel swift run
-HOVERSPEAK_VOICE=Mei-Jia HOVERSPEAK_RATE=180 swift run
-```
-
-For the Python version, use the same environment variables:
-
-```bash
-HOVERSPEAK_RATE=170 ./run.sh
-HOVERSPEAK_VOICE=Daniel ./run.sh
-HOVERSPEAK_TRIGGER_MODE=off ./run.sh
-HOVERSPEAK_TRIGGER_MODE=selection ./run.sh
-HOVERSPEAK_TRIGGER_MODE=both ./run.sh
-HOVERSPEAK_OCR=0 ./run.sh
-HOVERSPEAK_OCR_LANGUAGES=zh-Hans,en-US ./run.sh
-HOVERSPEAK_SELECTION=0 ./run.sh
-HOVERSPEAK_SELECTION_PAUSE=1.2 ./run.sh
-HOVERSPEAK_SELECTION_COPY=auto ./run.sh
-HOVERSPEAK_SELECTION_COPY=0 ./run.sh
-HOVERSPEAK_SELECTION_COPY=1 ./run.sh
-HOVERSPEAK_CJK_CHARS=4 ./run.sh
-HOVERSPEAK_OCR_WIDTH=300 HOVERSPEAK_OCR_HEIGHT=80 ./run.sh
-```
-
-OCR fallback is enabled by default. It helps with software that renders text visually but does not expose word positions through Accessibility. macOS may also require Screen Recording permission for your terminal app:
-
-`System Settings > Privacy & Security > Screen & System Audio Recording`
-
-Selection loop is enabled by default. Highlight text to repeatedly speak the selected text; clear the highlight to return to hover mode. The `Cmd+C` fallback defaults to `auto`: it helps with apps that do not expose selected text through Accessibility, but is disabled while an editable text field is focused.
-
-When text is highlighted, HoverSpeak shows a small three-stage switch beside the cursor:
-
-- `关`: never speak.
-- `选`: speak only highlighted text.
-- `全`: speak highlighted text, and also speak nearby text when nothing is highlighted.
-
-The switch is placed once when a new text highlight is detected. It does not follow the mouse. Click anywhere outside the switch to hide it until the next highlighted text selection.
-
-List available voices:
-
-```bash
-say -v '?'
-```
-
-## Current limitations
-
-- Works best in native macOS text controls and apps that expose text through Accessibility.
-- OCR fallback can read many custom-rendered apps, PDFs, and images, but it is less precise than Accessibility.
-- Screen Recording permission may be needed for OCR.
+- Works best with native macOS text controls.
+- OCR can help with custom-rendered apps, PDFs, images, and complex interfaces, but precision depends on fonts, scale, backgrounds, and line spacing.
+- OCR requires Screen Recording permission.
+- Nearby text detection is a combination of Accessibility and OCR, not a system-level text selection, so some edge cases may still need tuning.
