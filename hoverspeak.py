@@ -57,8 +57,17 @@ OCR_LINE_MAX_CHARS = int(os.getenv("HOVERSPEAK_OCR_LINE_MAX_CHARS", "24"))
 SELECTION_ENABLED = os.getenv("HOVERSPEAK_SELECTION", "1") != "0"
 SELECTION_REPEAT_PAUSE = float(os.getenv("HOVERSPEAK_SELECTION_PAUSE", "0.8"))
 SELECTION_MAX_CHARS = int(os.getenv("HOVERSPEAK_SELECTION_MAX_CHARS", "1200"))
-SELECTION_COPY_MODE = os.getenv("HOVERSPEAK_SELECTION_COPY", "auto").lower()
+SELECTION_COPY_MODE = os.getenv("HOVERSPEAK_SELECTION_COPY", "off").lower()
 SELECTION_COPY_INTERVAL = float(os.getenv("HOVERSPEAK_SELECTION_COPY_INTERVAL", "0.8"))
+UNSAFE_KEYBOARD_COPY = os.getenv("HOVERSPEAK_UNSAFE_KEYBOARD_COPY", "0") == "1"
+SELECTION_COPY_BLOCKED_BUNDLES = {
+    bundle.strip()
+    for bundle in os.getenv(
+        "HOVERSPEAK_SELECTION_COPY_BLOCKED_BUNDLES",
+        "com.apple.Safari,com.google.Chrome,com.google.Chrome.canary,com.microsoft.edgemac,com.brave.Browser,org.mozilla.firefox",
+    ).split(",")
+    if bundle.strip()
+}
 OCR_ENABLED = os.getenv("HOVERSPEAK_OCR", "1") != "0"
 OCR_WIDTH = int(os.getenv("HOVERSPEAK_OCR_WIDTH", "360"))
 OCR_HEIGHT = int(os.getenv("HOVERSPEAK_OCR_HEIGHT", "96"))
@@ -362,12 +371,10 @@ class HoverSpeaker:
         print(f"Trigger mode: {self.trigger_mode}. Highlight text to show the three-stage switch.")
         if SELECTION_ENABLED:
             print("Selection loop is on. Highlight text to repeat it; clear the highlight to return to hover mode.")
-            if SELECTION_COPY_MODE == "auto":
-                print("Selection copy fallback is auto. It is disabled while an editable field is focused.")
-            elif SELECTION_COPY_MODE == "1":
-                print("Selection copy fallback is on. It may briefly use Cmd+C when AXSelectedText is unavailable.")
+            if self._keyboard_copy_fallback_enabled():
+                print("Unsafe keyboard copy fallback is on. HoverSpeak may briefly send Cmd+C.")
             else:
-                print("Selection copy fallback is off.")
+                print("Keyboard copy fallback is off. HoverSpeak will not send Cmd+C.")
         if not self.accessibility_enabled:
             print("Accessibility is not enabled, so HoverSpeak will use OCR-only mode.")
         if OCR_ENABLED:
@@ -596,29 +603,51 @@ class HoverSpeaker:
         return None
 
     def _should_use_copy_fallback(self, app_element) -> bool:
-        if SELECTION_COPY_MODE in ("0", "false", "off", "no"):
+        if not self._keyboard_copy_fallback_enabled():
             return False
-        if SELECTION_COPY_MODE in ("1", "true", "on", "yes"):
-            return True
+        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        bundle = app.bundleIdentifier() if app is not None else ""
+        if bundle in SELECTION_COPY_BLOCKED_BUNDLES:
+            return False
         return not self._focused_element_is_editable(app_element)
+
+    def _keyboard_copy_fallback_enabled(self) -> bool:
+        return UNSAFE_KEYBOARD_COPY and SELECTION_COPY_MODE in {"1", "true", "on", "yes"}
 
     def _focused_element_is_editable(self, app_element) -> bool:
         focused = self._attribute(app_element, "AXFocusedUIElement")
         if focused is None:
             return False
 
-        role = self._string_attribute(focused, AS.kAXRoleAttribute) or ""
-        subrole = self._string_attribute(focused, "AXSubrole") or ""
+        current = focused
+        seen = set()
+        for _ in range(6):
+            if current is None:
+                break
+            key = repr(current)
+            if key in seen:
+                break
+            seen.add(key)
+
+            if self._element_is_editable(current):
+                return True
+            current = self._attribute(current, AS.kAXParentAttribute)
+
+        return False
+
+    def _element_is_editable(self, element) -> bool:
+        role = self._string_attribute(element, AS.kAXRoleAttribute) or ""
+        subrole = self._string_attribute(element, "AXSubrole") or ""
         if role in {"AXTextArea", "AXTextField", "AXComboBox", "AXSearchField"}:
             return True
         if subrole in {"AXTextAttachment", "AXSecureTextField"}:
             return True
 
-        editable = self._attribute(focused, "AXEditable")
+        editable = self._attribute(element, "AXEditable")
         if editable is not None:
             return bool(editable)
 
-        writable = self._attribute_names(focused)
+        writable = self._attribute_names(element)
         return "AXSelectedTextRange" in writable and "AXValue" in writable
 
     def _selected_text_in_tree(self, root) -> str | None:
@@ -701,6 +730,9 @@ class HoverSpeaker:
             pasteboard.writeObjects_(restored_items)
 
     def _send_copy_shortcut(self) -> None:
+        if not self._keyboard_copy_fallback_enabled():
+            return
+
         source = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
         command_down = Quartz.CGEventCreateKeyboardEvent(source, 55, True)
         c_down = Quartz.CGEventCreateKeyboardEvent(source, 8, True)

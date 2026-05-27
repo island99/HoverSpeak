@@ -100,9 +100,8 @@ HOVERSPEAK_OCR_Y_OFFSET=4 ./run.sh
 
 HOVERSPEAK_SELECTION=0 ./run.sh
 HOVERSPEAK_SELECTION_PAUSE=1.2 ./run.sh
-HOVERSPEAK_SELECTION_COPY=auto ./run.sh
-HOVERSPEAK_SELECTION_COPY=0 ./run.sh
-HOVERSPEAK_SELECTION_COPY=1 ./run.sh
+HOVERSPEAK_SELECTION_COPY=off ./run.sh
+HOVERSPEAK_UNSAFE_KEYBOARD_COPY=1 HOVERSPEAK_SELECTION_COPY=1 ./run.sh
 ```
 
 ### Option Reference
@@ -120,7 +119,10 @@ HOVERSPEAK_SELECTION_COPY=1 ./run.sh
 | `HOVERSPEAK_OCR` | Enable or disable OCR |
 | `HOVERSPEAK_OCR_Y_OFFSET` | Vertical calibration for OCR results |
 | `HOVERSPEAK_SELECTION_PAUSE` | Repeat interval for highlighted text |
-| `HOVERSPEAK_SELECTION_COPY` | Clipboard fallback for selected text: `auto`, `0`, or `1` |
+| `HOVERSPEAK_SELECTION_COPY` | Clipboard fallback mode. Defaults to `off`; it does not send keyboard events unless unsafe copy is explicitly enabled |
+| `HOVERSPEAK_UNSAFE_KEYBOARD_COPY` | Set to `1` only if you accept HoverSpeak sending `Cmd+C` as a fallback |
+
+By default, HoverSpeak never sends keyboard shortcuts. This avoids stray `c` input while typing in browsers, input methods, or editable fields.
 
 List available system voices:
 

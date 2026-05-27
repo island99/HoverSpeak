@@ -100,9 +100,8 @@ HOVERSPEAK_OCR_Y_OFFSET=4 ./run.sh
 
 HOVERSPEAK_SELECTION=0 ./run.sh
 HOVERSPEAK_SELECTION_PAUSE=1.2 ./run.sh
-HOVERSPEAK_SELECTION_COPY=auto ./run.sh
-HOVERSPEAK_SELECTION_COPY=0 ./run.sh
-HOVERSPEAK_SELECTION_COPY=1 ./run.sh
+HOVERSPEAK_SELECTION_COPY=off ./run.sh
+HOVERSPEAK_UNSAFE_KEYBOARD_COPY=1 HOVERSPEAK_SELECTION_COPY=1 ./run.sh
 ```
 
 ### 配置说明
@@ -120,7 +119,10 @@ HOVERSPEAK_SELECTION_COPY=1 ./run.sh
 | `HOVERSPEAK_OCR` | 是否启用 OCR |
 | `HOVERSPEAK_OCR_Y_OFFSET` | OCR 结果的上下校准 |
 | `HOVERSPEAK_SELECTION_PAUSE` | 高亮文本循环朗读间隔 |
-| `HOVERSPEAK_SELECTION_COPY` | 是否用复制作为选中文本兜底：`auto`、`0`、`1` |
+| `HOVERSPEAK_SELECTION_COPY` | 复制兜底模式，默认 `off`；除非显式开启 unsafe copy，否则不会发送键盘事件 |
+| `HOVERSPEAK_UNSAFE_KEYBOARD_COPY` | 只有你接受 HoverSpeak 发送 `Cmd+C` 作为兜底时才设为 `1` |
+
+默认情况下，HoverSpeak 不会发送任何键盘快捷键。这样可以避免在浏览器、输入法或输入框里误输入 `c`。
 
 查看系统可用语音：
 
