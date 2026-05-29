@@ -57,7 +57,7 @@ OCR_LINE_MAX_CHARS = int(os.getenv("HOVERSPEAK_OCR_LINE_MAX_CHARS", "24"))
 SELECTION_ENABLED = os.getenv("HOVERSPEAK_SELECTION", "1") != "0"
 SELECTION_REPEAT_PAUSE = float(os.getenv("HOVERSPEAK_SELECTION_PAUSE", "0.8"))
 SELECTION_MAX_CHARS = int(os.getenv("HOVERSPEAK_SELECTION_MAX_CHARS", "1200"))
-SELECTION_COPY_MODE = os.getenv("HOVERSPEAK_SELECTION_COPY", "off").lower()
+SELECTION_COPY_MODE = os.getenv("HOVERSPEAK_SELECTION_COPY", "menu").lower()
 SELECTION_COPY_INTERVAL = float(os.getenv("HOVERSPEAK_SELECTION_COPY_INTERVAL", "0.8"))
 UNSAFE_KEYBOARD_COPY = os.getenv("HOVERSPEAK_UNSAFE_KEYBOARD_COPY", "0") == "1"
 SELECTION_COPY_BLOCKED_BUNDLES = {
@@ -88,6 +88,8 @@ CHILD_ATTRIBUTES = (
     AS.kAXContentsAttribute,
     "AXChildrenInNavigationOrder",
 )
+SAFE_COPY_MODES = {"1", "true", "on", "yes", "menu", "safe"}
+UNSAFE_COPY_MODES = {"1", "true", "on", "yes", "keyboard", "unsafe"}
 
 
 @dataclass
@@ -199,7 +201,7 @@ class TriggerSwitchController(AppKit.NSObject):
         self.shown_at = time.monotonic()
         mouse = AppKit.NSEvent.mouseLocation()
         frame = self.panel.frame()
-        screen = AppKit.NSScreen.mainScreen()
+        screen = self._screen_at_point(mouse)
         visible = screen.visibleFrame() if screen is not None else AppKit.NSMakeRect(0, 0, 1440, 900)
         x = min(max(mouse.x + 12, visible.origin.x), visible.origin.x + visible.size.width - frame.size.width)
         y = min(max(mouse.y - 8, visible.origin.y), visible.origin.y + visible.size.height - frame.size.height)
@@ -249,6 +251,13 @@ class TriggerSwitchController(AppKit.NSObject):
         if event.window() == self.panel:
             return
         self.dismiss_current_selection()
+
+    def _screen_at_point(self, point):
+        for screen in AppKit.NSScreen.screens():
+            sf = screen.frame()
+            if sf.origin.x <= point.x <= sf.origin.x + sf.size.width and sf.origin.y <= point.y <= sf.origin.y + sf.size.height:
+                return screen
+        return AppKit.NSScreen.mainScreen()
 
     def _point_is_inside_panel(self, point) -> bool:
         frame = self.panel.frame()
@@ -371,9 +380,11 @@ class HoverSpeaker:
         print(f"Trigger mode: {self.trigger_mode}. Highlight text to show the three-stage switch.")
         if SELECTION_ENABLED:
             print("Selection loop is on. Highlight text to repeat it; clear the highlight to return to hover mode.")
+            if self._menu_copy_fallback_enabled():
+                print("Menu copy fallback is on. HoverSpeak may use the app's Copy menu item without sending keys.")
             if self._keyboard_copy_fallback_enabled():
                 print("Unsafe keyboard copy fallback is on. HoverSpeak may briefly send Cmd+C.")
-            else:
+            elif not self._menu_copy_fallback_enabled():
                 print("Keyboard copy fallback is off. HoverSpeak will not send Cmd+C.")
         if not self.accessibility_enabled:
             print("Accessibility is not enabled, so HoverSpeak will use OCR-only mode.")
@@ -600,6 +611,9 @@ class HoverSpeaker:
         if self._should_use_copy_fallback(app_element):
             return self._selected_text_by_copy()
 
+        if self._menu_copy_fallback_enabled():
+            return self._selected_text_via_menu()
+
         return None
 
     def _should_use_copy_fallback(self, app_element) -> bool:
@@ -610,6 +624,9 @@ class HoverSpeaker:
         if bundle in SELECTION_COPY_BLOCKED_BUNDLES:
             return False
         return not self._focused_element_is_editable(app_element)
+
+    def _menu_copy_fallback_enabled(self) -> bool:
+        return SELECTION_COPY_MODE in SAFE_COPY_MODES
 
     def _keyboard_copy_fallback_enabled(self) -> bool:
         return UNSAFE_KEYBOARD_COPY and SELECTION_COPY_MODE in {"1", "true", "on", "yes"}
@@ -654,8 +671,10 @@ class HoverSpeaker:
         queue = [(root, 0)]
         seen = set()
 
-        while queue:
-            element, depth = queue.pop(0)
+        idx = 0
+        while idx < len(queue):
+            element, depth = queue[idx]
+            idx += 1
             key = repr(element)
             if key in seen:
                 continue
@@ -706,6 +725,61 @@ class HoverSpeaker:
 
         return self._clean_selected_text(copied)
 
+    def _selected_text_via_menu(self) -> str | None:
+        now = time.monotonic()
+        if now - self.last_selection_copy_at < SELECTION_COPY_INTERVAL:
+            return self.selection_text
+        self.last_selection_copy_at = now
+
+        pasteboard = AppKit.NSPasteboard.generalPasteboard()
+        old_change_count = pasteboard.changeCount()
+        snapshot = self._snapshot_pasteboard(pasteboard)
+
+        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        if app is None or not self._press_menu_copy(app.processIdentifier()):
+            self._restore_pasteboard(pasteboard, snapshot)
+            return None
+
+        time.sleep(0.1)
+
+        new_change_count = pasteboard.changeCount()
+        copied = pasteboard.stringForType_(AppKit.NSPasteboardTypeString)
+
+        self._restore_pasteboard(pasteboard, snapshot)
+
+        if new_change_count == old_change_count:
+            return None
+
+        return self._clean_selected_text(copied)
+
+    def _press_menu_copy(self, pid: int) -> bool:
+        app_element = AS.AXUIElementCreateApplication(pid)
+        menu_bar = self._attribute(app_element, "AXMenuBar")
+        if menu_bar is None:
+            return False
+        return self._walk_menu_for_copy(menu_bar, 0)
+
+    def _walk_menu_for_copy(self, element, depth: int) -> bool:
+        if depth > 10:
+            return False
+
+        role = self._string_attribute(element, "AXRole") or ""
+
+        if role == "AXMenuItem":
+            vkey = self._attribute(element, "AXMenuItemCmdVirtualKey")
+            modifiers = self._attribute(element, "AXMenuItemCmdModifiers")
+            # Virtual key 8 = 'C', modifier 256 = Command (cmdKey)
+            if vkey == 8 and isinstance(modifiers, int) and modifiers == 256:
+                return AS.AXUIElementPerformAction(element, AS.kAXPressAction) == AS.kAXErrorSuccess
+
+        children = self._attribute(element, "AXChildren")
+        if isinstance(children, (list, tuple)):
+            for child in children:
+                if self._walk_menu_for_copy(child, depth + 1):
+                    return True
+
+        return False
+
     def _snapshot_pasteboard(self, pasteboard):
         snapshot = []
         for item in pasteboard.pasteboardItems() or []:
@@ -745,20 +819,6 @@ class HoverSpeaker:
         for event in (command_down, c_down, c_up, command_up):
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
-    def _accessibility_word_under_cursor(self, point) -> tuple[str | None, str]:
-        system = AS.AXUIElementCreateSystemWide()
-        result, element = AS.AXUIElementCopyElementAtPosition(system, point.x, point.y, None)
-        if result != AS.kAXErrorSuccess or element is None:
-            return None, "accessibility:none"
-
-        for candidate in self._candidate_elements_at_point(point, element):
-            word = self._word_at(point, candidate)
-            if DEBUG:
-                self._debug_element(candidate, point, word)
-            if word:
-                return word, self._describe(candidate)
-
-        return None, self._describe(element)
 
     def _accessibility_text_inside_cursor_region(self, point) -> tuple[str | None, str]:
         system = AS.AXUIElementCreateSystemWide()
@@ -843,10 +903,6 @@ class HoverSpeaker:
             self.warned_about_screenshot = True
         return image
 
-    def _word_near_crop_center(self, lines: list[tuple[str, object]]) -> str | None:
-        crop_origin = Quartz.CGPoint(0, 0)
-        point = Quartz.CGPoint(OCR_WIDTH / 2, OCR_HEIGHT / 2)
-        return self._word_near_point(lines, point, crop_origin)
 
     def _word_near_point(self, lines: list[tuple[str, object]], point, crop_origin) -> str | None:
         best_word = None

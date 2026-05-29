@@ -40,7 +40,8 @@ private final class HoverSpeaker {
 
     private func speakWordUnderCursor() {
         let mouse = NSEvent.mouseLocation
-        let point = CGPoint(x: mouse.x, y: NSScreen.screensFrameHeight - mouse.y)
+        let currentScreen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
+        let point = CGPoint(x: mouse.x, y: (currentScreen?.frame.maxY ?? NSScreen.screensFrameHeight) - mouse.y)
         let systemWide = AXUIElementCreateSystemWide()
 
         var rawElement: AXUIElement?

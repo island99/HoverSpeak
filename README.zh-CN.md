@@ -119,7 +119,7 @@ HOVERSPEAK_UNSAFE_KEYBOARD_COPY=1 HOVERSPEAK_SELECTION_COPY=1 ./run.sh
 | `HOVERSPEAK_OCR` | 是否启用 OCR |
 | `HOVERSPEAK_OCR_Y_OFFSET` | OCR 结果的上下校准 |
 | `HOVERSPEAK_SELECTION_PAUSE` | 高亮文本循环朗读间隔 |
-| `HOVERSPEAK_SELECTION_COPY` | 复制兜底模式，默认 `off`；除非显式开启 unsafe copy，否则不会发送键盘事件 |
+| `HOVERSPEAK_SELECTION_COPY` | 复制兜底模式，默认 `menu`；通过辅助功能调用 App 的编辑 > 拷贝菜单项，安全、不会发送键盘事件。设为 `off` 可完全禁用 |
 | `HOVERSPEAK_UNSAFE_KEYBOARD_COPY` | 只有你接受 HoverSpeak 发送 `Cmd+C` 作为兜底时才设为 `1` |
 
 默认情况下，HoverSpeak 不会发送任何键盘快捷键。这样可以避免在浏览器、输入法或输入框里误输入 `c`。
