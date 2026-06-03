@@ -60,10 +60,19 @@ SELECTION_MAX_CHARS = int(os.getenv("HOVERSPEAK_SELECTION_MAX_CHARS", "1200"))
 SELECTION_COPY_MODE = os.getenv("HOVERSPEAK_SELECTION_COPY", "menu").lower()
 SELECTION_COPY_INTERVAL = float(os.getenv("HOVERSPEAK_SELECTION_COPY_INTERVAL", "0.8"))
 UNSAFE_KEYBOARD_COPY = os.getenv("HOVERSPEAK_UNSAFE_KEYBOARD_COPY", "0") == "1"
+PROTECTED_KEYBOARD_COPY = os.getenv("HOVERSPEAK_PROTECTED_KEYBOARD_COPY", "1") != "0"
 SELECTION_COPY_BLOCKED_BUNDLES = {
     bundle.strip()
     for bundle in os.getenv(
         "HOVERSPEAK_SELECTION_COPY_BLOCKED_BUNDLES",
+        "com.apple.Safari,com.google.Chrome,com.google.Chrome.canary,com.microsoft.edgemac,com.brave.Browser,org.mozilla.firefox",
+    ).split(",")
+    if bundle.strip()
+}
+PROTECTED_KEYBOARD_COPY_BLOCKED_BUNDLES = {
+    bundle.strip()
+    for bundle in os.getenv(
+        "HOVERSPEAK_PROTECTED_KEYBOARD_COPY_BLOCKED_BUNDLES",
         "com.apple.Safari,com.google.Chrome,com.google.Chrome.canary,com.microsoft.edgemac,com.brave.Browser,org.mozilla.firefox",
     ).split(",")
     if bundle.strip()
@@ -382,6 +391,8 @@ class HoverSpeaker:
             print("Selection loop is on. Highlight text to repeat it; clear the highlight to return to hover mode.")
             if self._menu_copy_fallback_enabled():
                 print("Menu copy fallback is on. HoverSpeak may use the app's Copy menu item without sending keys.")
+            if PROTECTED_KEYBOARD_COPY:
+                print("Protected copy fallback is on for apps that do not expose selection text.")
             if self._keyboard_copy_fallback_enabled():
                 print("Unsafe keyboard copy fallback is on. HoverSpeak may briefly send Cmd+C.")
             elif not self._menu_copy_fallback_enabled():
@@ -596,6 +607,7 @@ class HoverSpeaker:
 
         app_element = AS.AXUIElementCreateApplication(app.processIdentifier())
         roots = [
+            self._selected_text_root_under_mouse(),
             self._attribute(app_element, "AXFocusedUIElement"),
             self._attribute(app_element, "AXFocusedWindow"),
             app_element,
@@ -612,9 +624,22 @@ class HoverSpeaker:
             return self._selected_text_by_copy()
 
         if self._menu_copy_fallback_enabled():
-            return self._selected_text_via_menu()
+            selected = self._selected_text_via_menu()
+            if selected:
+                return selected
+
+        if self._protected_keyboard_copy_fallback_enabled(app_element):
+            return self._selected_text_by_protected_copy()
 
         return None
+
+    def _selected_text_root_under_mouse(self):
+        point = self._mouse_point_for_accessibility()
+        system = AS.AXUIElementCreateSystemWide()
+        result, element = AS.AXUIElementCopyElementAtPosition(system, point.x, point.y, None)
+        if result != AS.kAXErrorSuccess or element is None:
+            return None
+        return element
 
     def _should_use_copy_fallback(self, app_element) -> bool:
         if not self._keyboard_copy_fallback_enabled():
@@ -629,7 +654,16 @@ class HoverSpeaker:
         return SELECTION_COPY_MODE in SAFE_COPY_MODES
 
     def _keyboard_copy_fallback_enabled(self) -> bool:
-        return UNSAFE_KEYBOARD_COPY and SELECTION_COPY_MODE in {"1", "true", "on", "yes"}
+        return UNSAFE_KEYBOARD_COPY and SELECTION_COPY_MODE in UNSAFE_COPY_MODES
+
+    def _protected_keyboard_copy_fallback_enabled(self, app_element) -> bool:
+        if not PROTECTED_KEYBOARD_COPY or SELECTION_COPY_MODE == "off":
+            return False
+        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        bundle = app.bundleIdentifier() if app is not None else ""
+        if bundle in PROTECTED_KEYBOARD_COPY_BLOCKED_BUNDLES:
+            return False
+        return not self._focused_element_is_editable(app_element)
 
     def _focused_element_is_editable(self, app_element) -> bool:
         focused = self._attribute(app_element, "AXFocusedUIElement")
@@ -684,6 +718,10 @@ class HoverSpeaker:
             if selected:
                 return selected
 
+            selected = self._selected_text_from_range(element)
+            if selected:
+                return selected
+
             if depth >= 8:
                 continue
 
@@ -693,6 +731,25 @@ class HoverSpeaker:
                     queue.extend((child, depth + 1) for child in children)
 
         return None
+
+    def _selected_text_from_range(self, element) -> str | None:
+        text = self._string_attribute(element, AS.kAXValueAttribute)
+        if not text:
+            return None
+
+        raw_range = self._attribute(element, AS.kAXSelectedTextRangeAttribute)
+        if raw_range is None:
+            return None
+
+        ok, selected_range = AS.AXValueGetValue(raw_range, AS.kAXValueCFRangeType, None)
+        if not ok or selected_range is None:
+            return None
+
+        location, length = selected_range
+        if length <= 0:
+            return None
+
+        return self._clean_selected_text(text[location : location + length])
 
     def _clean_selected_text(self, text: str | None) -> str | None:
         if not text:
@@ -725,6 +782,29 @@ class HoverSpeaker:
 
         return self._clean_selected_text(copied)
 
+    def _selected_text_by_protected_copy(self) -> str | None:
+        now = time.monotonic()
+        if now - self.last_selection_copy_at < SELECTION_COPY_INTERVAL:
+            return self.selection_text
+        self.last_selection_copy_at = now
+
+        pasteboard = AppKit.NSPasteboard.generalPasteboard()
+        old_change_count = pasteboard.changeCount()
+        snapshot = self._snapshot_pasteboard(pasteboard)
+
+        self._send_protected_copy_shortcut()
+        time.sleep(0.08)
+
+        new_change_count = pasteboard.changeCount()
+        copied = pasteboard.stringForType_(AppKit.NSPasteboardTypeString)
+
+        self._restore_pasteboard(pasteboard, snapshot)
+
+        if new_change_count == old_change_count:
+            return None
+
+        return self._clean_selected_text(copied)
+
     def _selected_text_via_menu(self) -> str | None:
         now = time.monotonic()
         if now - self.last_selection_copy_at < SELECTION_COPY_INTERVAL:
@@ -737,6 +817,7 @@ class HoverSpeaker:
 
         app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
         if app is None or not self._press_menu_copy(app.processIdentifier()):
+            self.last_selection_copy_at = 0.0
             self._restore_pasteboard(pasteboard, snapshot)
             return None
 
@@ -748,6 +829,7 @@ class HoverSpeaker:
         self._restore_pasteboard(pasteboard, snapshot)
 
         if new_change_count == old_change_count:
+            self.last_selection_copy_at = 0.0
             return None
 
         return self._clean_selected_text(copied)
@@ -766,10 +848,21 @@ class HoverSpeaker:
         role = self._string_attribute(element, "AXRole") or ""
 
         if role == "AXMenuItem":
+            title = (self._string_attribute(element, "AXTitle") or "").strip()
             vkey = self._attribute(element, "AXMenuItemCmdVirtualKey")
             modifiers = self._attribute(element, "AXMenuItemCmdModifiers")
-            # Virtual key 8 = 'C', modifier 256 = Command (cmdKey)
-            if vkey == 8 and isinstance(modifiers, int) and modifiers == 256:
+            try:
+                vkey = int(vkey)
+            except (TypeError, ValueError):
+                vkey = None
+            try:
+                modifiers = int(modifiers)
+            except (TypeError, ValueError):
+                modifiers = None
+
+            is_copy_title = title.casefold() in {"copy", "复制", "拷贝"}
+            is_cmd_c = vkey == 8 and (modifiers is None or modifiers in {0, 256})
+            if is_copy_title or is_cmd_c:
                 return AS.AXUIElementPerformAction(element, AS.kAXPressAction) == AS.kAXErrorSuccess
 
         children = self._attribute(element, "AXChildren")
@@ -817,6 +910,17 @@ class HoverSpeaker:
         Quartz.CGEventSetFlags(c_up, Quartz.kCGEventFlagMaskCommand)
 
         for event in (command_down, c_down, c_up, command_up):
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+
+    def _send_protected_copy_shortcut(self) -> None:
+        source = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        c_down = Quartz.CGEventCreateKeyboardEvent(source, 8, True)
+        c_up = Quartz.CGEventCreateKeyboardEvent(source, 8, False)
+
+        Quartz.CGEventSetFlags(c_down, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventSetFlags(c_up, Quartz.kCGEventFlagMaskCommand)
+
+        for event in (c_down, c_up):
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
